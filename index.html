@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Rich Text to Markdown</title>
+<script src="https://cdn.jsdelivr.net/npm/turndown@7.2.0/dist/turndown.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/turndown-plugin-gfm@1.0.2/dist/turndown-plugin-gfm.js"></script>
+<style>
+  :root { --bg:#fff; --fg:#1f2328; --border:#d0d7de; --accent:#0969da; --muted:#f6f8fa; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#0d1117; --fg:#e6edf3; --border:#30363d; --accent:#4493f8; --muted:#161b22; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; font:15px/1.5 system-ui,sans-serif; background:var(--bg); color:var(--fg); }
+  header { padding:12px 16px; border-bottom:1px solid var(--border); display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  header h1 { font-size:16px; margin:0 auto 0 0; }
+  button { font:inherit; padding:5px 12px; border:1px solid var(--border); border-radius:6px; background:var(--muted); color:var(--fg); cursor:pointer; }
+  button:hover { border-color:var(--accent); }
+  main { display:grid; grid-template-columns:1fr 1fr; gap:16px; padding:16px; }
+  @media (max-width:800px) { main { grid-template-columns:1fr; } }
+  h2 { font-size:13px; text-transform:uppercase; letter-spacing:.05em; margin:0 0 6px; opacity:.7; }
+  .toolbar { display:flex; gap:4px; flex-wrap:wrap; margin-bottom:6px; }
+  #editor, #output { width:100%; min-height:60vh; border:1px solid var(--border); border-radius:6px; padding:12px; background:var(--bg); color:var(--fg); overflow:auto; }
+  #output { font:13px/1.5 ui-monospace,Consolas,monospace; resize:vertical; }
+  #editor:focus, #output:focus { outline:2px solid var(--accent); }
+  #editor table { border-collapse:collapse; margin:8px 0; }
+  #editor th, #editor td { border:1px solid var(--border); padding:4px 8px; min-width:60px; }
+  #editor th { background:var(--muted); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Rich Text → Markdown</h1>
+  <button id="copy">Copy</button>
+  <button id="download">Download .md</button>
+  <button id="clear">Clear</button>
+</header>
+<main>
+  <section>
+    <h2>Editor (paste or type)</h2>
+    <div class="toolbar">
+      <button data-cmd="bold"><b>B</b></button>
+      <button data-cmd="italic"><i>I</i></button>
+      <button data-cmd="formatBlock" data-val="h2">H2</button>
+      <button data-cmd="insertUnorderedList">• List</button>
+      <button data-cmd="insertOrderedList">1. List</button>
+      <button id="addTable">Insert table</button>
+      <button id="addRow">+ Row</button>
+      <button id="addCol">+ Column</button>
+    </div>
+    <div id="editor" contenteditable="true" spellcheck="false"></div>
+  </section>
+  <section>
+    <h2>Markdown (editable)</h2>
+    <textarea id="output" spellcheck="false"></textarea>
+  </section>
+</main>
+
+<script>
+const td = new TurndownService({ headingStyle:'atx', codeBlockStyle:'fenced', bulletListMarker:'-' });
+td.use(turndownPluginGfm.gfm);
+
+// Pipe tables need a header row; also cells can't contain newlines.
+td.addRule('tableCellBreaks', {
+  filter: ['td','th'],
+  replacement(content, node) {
+    const text = content.replace(/\n+/g,' ').replace(/\|/g,'\\|').trim();
+    const idx = Array.prototype.indexOf.call(node.parentNode.childNodes, node);
+    return (idx === 0 ? '| ' : ' ') + text + ' |';
+  }
+});
+
+const editor = document.getElementById('editor');
+const output = document.getElementById('output');
+
+function toMarkdown(html) {
+  const doc = new DOMParser().parseFromString(html, 'text/html');
+  // Promote the first row to a header if the table has no <th>/<thead>.
+  doc.querySelectorAll('style,script,meta,link,title,col,colgroup,o\\:p').forEach(n => n.remove());
+  // Rebuild every table as <table><thead><tr><th>…</tr></thead><tbody>…</tbody></table>.
+  // Excel/Word markup (colgroups, whitespace, bare <tr>, nested tables) otherwise makes
+  // the GFM plugin give up and emit raw HTML.
+  Array.from(doc.querySelectorAll('table')).reverse().forEach(t => {
+    const rows = Array.from(t.querySelectorAll('tr')).filter(tr => tr.closest('table') === t);
+    if (!rows.length) { t.remove(); return; }
+    const width = Math.max(...rows.map(tr => tr.cells.length));
+    const nt = doc.createElement('table');
+    const head = nt.createTHead(), body = nt.createTBody();
+    rows.forEach((tr, i) => {
+      const nr = (i === 0 ? head : body).insertRow();
+      for (let c = 0; c < width; c++) {
+        const src = tr.cells[c];
+        const cell = doc.createElement(i === 0 ? 'th' : 'td');
+        if (src) {
+          src.querySelectorAll('p,div,br').forEach(el => el.replaceWith(doc.createTextNode(' '), ...(el.tagName === 'BR' ? [] : el.childNodes)));
+          cell.innerHTML = src.innerHTML.replace(/&nbsp;| /g, ' ');
+        }
+        nr.appendChild(cell);
+      }
+    });
+    t.replaceWith(nt);
+  });
+  return td.turndown(doc.body.innerHTML);
+}
+
+function update() { output.value = toMarkdown(editor.innerHTML); }
+editor.addEventListener('input', update);
+editor.addEventListener('paste', () => setTimeout(update, 0));
+
+document.querySelectorAll('[data-cmd]').forEach(b => b.addEventListener('mousedown', e => {
+  e.preventDefault();
+  document.execCommand(b.dataset.cmd, false, b.dataset.val || null);
+  update();
+}));
+
+function currentCell() {
+  const n = getSelection().anchorNode;
+  return n && (n.nodeType === 1 ? n : n.parentElement).closest('td,th');
+}
+document.getElementById('addTable').addEventListener('mousedown', e => {
+  e.preventDefault();
+  const row = tag => `<tr>${`<${tag}>&nbsp;</${tag}>`.repeat(3)}</tr>`;
+  document.execCommand('insertHTML', false,
+    `<table><thead>${row('th')}</thead><tbody>${row('td')}${row('td')}</tbody></table><p><br></p>`);
+  update();
+});
+document.getElementById('addRow').addEventListener('mousedown', e => {
+  e.preventDefault();
+  const c = currentCell(); if (!c) return;
+  const tr = c.parentElement.cloneNode(true);
+  tr.querySelectorAll('th,td').forEach(x => { x.innerHTML = '&nbsp;'; });
+  const body = c.closest('table').tBodies[0] || c.closest('table');
+  if (c.parentElement.parentElement.tagName === 'THEAD') body.prepend(tr); else c.parentElement.after(tr);
+  update();
+});
+document.getElementById('addCol').addEventListener('mousedown', e => {
+  e.preventDefault();
+  const c = currentCell(); if (!c) return;
+  const i = c.cellIndex;
+  c.closest('table').querySelectorAll('tr').forEach(tr => {
+    const ref = tr.cells[i];
+    const n = document.createElement(tr.cells[0].tagName.toLowerCase());
+    n.innerHTML = '&nbsp;';
+    ref ? ref.after(n) : tr.append(n);
+  });
+  update();
+});
+
+document.getElementById('copy').onclick = async () => {
+  await navigator.clipboard.writeText(output.value);
+};
+document.getElementById('download').onclick = () => {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([output.value], { type:'text/markdown' }));
+  a.download = 'output.md'; a.click(); URL.revokeObjectURL(a.href);
+};
+document.getElementById('clear').onclick = () => { editor.innerHTML = ''; output.value = ''; };
+</script>
+</body>
+</html>
